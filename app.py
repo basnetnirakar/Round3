@@ -1,12 +1,8 @@
 from __future__ import annotations
 
 import zipfile
-from pathlib import Path
 from typing import Dict, List, Optional
 import uuid
-import os
-import tempfile
-import requests
 
 import pandas as pd
 import streamlit as st
@@ -31,11 +27,6 @@ except Exception:
 # ============================================================
 # Antibody Data Manager for the exact Round3.xlsx layout
 #
-# Expected file layout:
-#   project/
-#     app.py
-#     Round3.xlsx
-#
 # Workbook layout expected from the provided example:
 #   Sheet name: Sheet1
 #   Columns:
@@ -48,24 +39,8 @@ except Exception:
 #     G  KD
 #     H  SPR-Mu              (Excel in-cell image / rich value)
 #     I  Remarks
-#
-# Notes:
-# - The images in columns C and H are stored as Excel rich-value cell images.
-# - Normal pandas/openpyxl reading will often show '#VALUE!' in those cells.
-# - This app reads the row data with pandas and separately extracts the actual
-#   image bytes by parsing the workbook zip structure.
-#
-# Install:
-#   pip install streamlit pandas openpyxl lxml
-#
-# Run:
-#   streamlit run app.py
 # ============================================================
 
-#WORKBOOK_LOCAL = Path("Round3_2.xlsx")
-WORKBOOK_URL = os.environ.get("https://docs.google.com/spreadsheets/d/1kO6jzsz5AmDdhJhz05ENbfpfzgTYEGH5/edit?usp=drive_link&ouid=114220445375690810621&rtpof=true&sd=true")  # set this in the hosting environment if using Drive
-
-# Workbook resolution: prefer the newer Round3_2.xlsx but fall back to Round3.xlsx
 SHEET_NAME = "Sheet1"
 EXCEL_ROW_OFFSET = 2  # pandas row 0 corresponds to Excel row 2 because row 1 is headers
 
@@ -105,15 +80,15 @@ def index_to_excel_col(idx: int) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def read_main_table(workbook_path: str) -> pd.DataFrame:
-    df = pd.read_excel(workbook_path, sheet_name=SHEET_NAME)
+def read_main_table(file_bytes: bytes) -> pd.DataFrame:
+    df = pd.read_excel(BytesIO(file_bytes), sheet_name=SHEET_NAME)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
 
 @st.cache_data(show_spinner=False)
-def read_workbook_info(workbook_path: str) -> Dict[str, object]:
-    wb = load_workbook(workbook_path, data_only=False)
+def read_workbook_info(file_bytes: bytes) -> Dict[str, object]:
+    wb = load_workbook(BytesIO(file_bytes), data_only=False)
     ws = wb[SHEET_NAME]
     return {
         "sheet_names": wb.sheetnames,
@@ -123,7 +98,7 @@ def read_workbook_info(workbook_path: str) -> Dict[str, object]:
 
 
 @st.cache_data(show_spinner=False)
-def extract_cell_images_from_xlsx(workbook_path: str) -> Dict[str, bytes]:
+def extract_cell_images_from_xlsx(file_bytes: bytes) -> Dict[str, bytes]:
     """
     Return a mapping of Excel cell reference to image bytes.
 
@@ -136,7 +111,7 @@ def extract_cell_images_from_xlsx(workbook_path: str) -> Dict[str, bytes]:
     """
     image_map: Dict[str, bytes] = {}
 
-    with zipfile.ZipFile(workbook_path, "r") as z:
+    with zipfile.ZipFile(BytesIO(file_bytes), "r") as z:
         names = set(z.namelist())
         rels_name = "xl/richData/_rels/richValueRel.xml.rels"
         sheet_xml_name = "xl/worksheets/sheet1.xml"
@@ -176,9 +151,9 @@ def extract_cell_images_from_xlsx(workbook_path: str) -> Dict[str, bytes]:
 
 
 @st.cache_data(show_spinner=False)
-def build_app_dataframe(workbook_path: str) -> pd.DataFrame:
-    df = read_main_table(workbook_path).copy()
-    image_map = extract_cell_images_from_xlsx(workbook_path)
+def build_app_dataframe(file_bytes: bytes) -> pd.DataFrame:
+    df = read_main_table(file_bytes).copy()
+    image_map = extract_cell_images_from_xlsx(file_bytes)
 
     excel_rows: List[int] = []
 
@@ -221,30 +196,23 @@ def build_app_dataframe(workbook_path: str) -> pd.DataFrame:
 # App UI
 # -----------------------------
 st.title("Antibody Data Manager")
-st.caption("Interactive browser for the exact Round3.xlsx layout, including in-cell EC50 and SPR images.")
+st.caption("Interactive browser for the Round3.xlsx layout, including in-cell EC50 and SPR images.")
 
-def ensure_workbook_local():
-    if WORKBOOK_LOCAL.exists():
-        return WORKBOOK_LOCAL
-    if WORKBOOK_URL:
-        # download to a temp file (persist to repo folder so subsequent reads work)
-        r = requests.get(WORKBOOK_URL, stream=True, timeout=30)
-        r.raise_for_status()
-        with open(WORKBOOK_LOCAL, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-        return WORKBOOK_LOCAL
-    raise FileNotFoundError(f"Workbook not found locally and WORKBOOK_URL not set: {WORKBOOK_LOCAL}")
+uploaded_file = st.file_uploader(
+    "Upload your Round3 workbook (.xlsx)",
+    type=["xlsx"],
+    help="Upload the Round3 Excel file to load the data.",
+)
 
-if not WORKBOOK_LOCAL.exists():
-    st.error(f"Workbook not found: {WORKBOOK_LOCAL.resolve()}")
-    st.info("Place Round3.xlsx in the same folder as app.py, then rerun the app.")
+if uploaded_file is None:
+    st.info("Please upload the Round3 Excel file to get started.")
     st.stop()
 
+file_bytes = uploaded_file.read()
+
 try:
-    app_df = build_app_dataframe(str(WORKBOOK_LOCAL))
-    workbook_info = read_workbook_info(str(WORKBOOK_LOCAL))
+    app_df = build_app_dataframe(file_bytes)
+    workbook_info = read_workbook_info(file_bytes)
 except Exception as e:
     st.error(f"Failed to load workbook: {e}")
     st.stop()
@@ -267,10 +235,14 @@ if search_text:
     filtered_df = filtered_df[mask]
 
 if only_with_ec50_image:
-    filtered_df = filtered_df[filtered_df["has_ec50_image"]]
+    ec50_flag = next((c for c in filtered_df.columns if c.startswith("has_") and "ec50" in c.lower()), None)
+    if ec50_flag:
+        filtered_df = filtered_df[filtered_df[ec50_flag]]
 
 if only_with_spr_image:
-    filtered_df = filtered_df[filtered_df["has_spr_image"]]
+    spr_flag = next((c for c in filtered_df.columns if c.startswith("has_") and "spr" in c.lower()), None)
+    if spr_flag:
+        filtered_df = filtered_df[filtered_df[spr_flag]]
 
 if only_spr_binding_positive:
     filtered_df = filtered_df[filtered_df["SPR_binding"].astype(str) == "1"]
@@ -283,18 +255,12 @@ display_present = [c for c in DISPLAY_COLUMNS if c in filtered_df.columns]
 # Collect any 'has_*_image' boolean flags that were added dynamically
 has_flags = [c for c in filtered_df.columns if c.startswith("has_") and c.endswith("_image")]
 
-# Build the show_table from available columns (don't assume optional SEC columns exist)
-show_table = filtered_df[display_present + has_flags].copy()
-
 # Rename has_* flags to friendly labels (e.g. has_ec50_image -> 'Ec50 image')
 rename_map = {}
 for flag in has_flags:
-    # derive base name between 'has_' and '_image'
     base = flag[len("has_") : -len("_image")] if flag.endswith("_image") else flag
     label = f"{base.replace('_', ' ').strip().title()} image"
     rename_map[flag] = label
-
-show_table = show_table.rename(columns=rename_map)
 
 # Build ag_table from the columns that actually exist to avoid KeyError
 ag_columns = display_present.copy()
@@ -326,24 +292,16 @@ if AGGRID_AVAILABLE:
         """Return a list of record dicts for various AgGrid response shapes."""
         if obj is None:
             return []
-        # pandas DataFrame -> records
         try:
             import pandas as _pd
-
             if isinstance(obj, _pd.DataFrame):
                 return obj.to_dict("records")
         except Exception:
             pass
-
-        # dict -> single-item list
         if isinstance(obj, dict):
             return [obj]
-
-        # list-like (including tuples)
         if isinstance(obj, (list, tuple)):
             return list(obj)
-
-        # some responses may be numpy arrays or other sequence types
         try:
             return list(obj)
         except Exception:
@@ -355,7 +313,6 @@ if AGGRID_AVAILABLE:
     if len(selected_rows) > 0:
         try:
             sel_row = selected_rows[0]
-            # extract excel_row robustly
             sel_excel = None
             if isinstance(sel_row, dict):
                 sel_excel = sel_row.get("excel_row")
@@ -364,19 +321,15 @@ if AGGRID_AVAILABLE:
                         if str(k).lower().replace(" ", "_") == "excel_row":
                             sel_excel = v
                             break
-            # coerce numeric-like values
             if sel_excel is not None:
                 try:
                     st.session_state.selected_excel_row = int(sel_excel)
                 except Exception:
                     st.error("Selected row excel_row value could not be converted to int")
         except Exception as e:
-            # show useful debug info in the app but don't crash
             st.error(f"Selection handling error: {e}")
             st.write("AgGrid selection response (raw):", selected_rows_raw)
             st.write("AgGrid selection response (normalized):", selected_rows)
-    # AgGrid is already rendered above; do not render the non-interactive table.
-    pass
 else:
     st.info("To enable clickable row selection install `streamlit-aggrid` (conda install -c conda-forge streamlit-aggrid).\nInteractive selection will be available after restarting the app.")
 
@@ -385,40 +338,26 @@ if filtered_df.empty:
     st.stop()
 
 # Ensure selected_excel_row exists and is valid for the current filtered_df
-if not filtered_df.empty:
-    if "selected_excel_row" not in st.session_state:
-        st.session_state.selected_excel_row = int(filtered_df.iloc[0]["excel_row"])
+if "selected_excel_row" not in st.session_state:
+    st.session_state.selected_excel_row = int(filtered_df.iloc[0]["excel_row"])
 
 # per-session unique token for widget keys to avoid duplicate-key collisions
 if "_ui_key_token" not in st.session_state:
     st.session_state["_ui_key_token"] = uuid.uuid4().hex
 
-    if st.session_state.selected_excel_row not in filtered_df["excel_row"].values:
-        st.session_state.selected_excel_row = int(filtered_df.iloc[0]["excel_row"])
+if st.session_state.selected_excel_row not in filtered_df["excel_row"].values:
+    st.session_state.selected_excel_row = int(filtered_df.iloc[0]["excel_row"])
 
 selected_row = filtered_df[filtered_df["excel_row"] == st.session_state.selected_excel_row].iloc[0]
 
 st.markdown(f"## Details: {selected_row['Antibody_name']}")
-left, right = st.columns([1, 1])
-
-with left:
-    # Summary moved below the Images tab per UI change request.
-    st.write("")
-
-with right:
-    # Workbook info moved below Summary in the Images tab.
-    st.write("")
 
 image_tab, raw_tab, gallery_tab = st.tabs(["Images", "Raw row", "Gallery"])
 
 with image_tab:
-    # Build image column list from dynamically-added has_* flags so we only
-    # show columns that actually had extracted images attached.
     has_flags_local = [c for c in app_df.columns if c.startswith("has_") and c.endswith("_image")]
     image_columns = [f[len("has_") : -len("_image")] for f in has_flags_local]
 
-    # Reliable Prev / Next buttons so users can navigate without relying on
-    # keyboard capture or AgGrid focus. These update session state and rerun.
     nav_col1, nav_col2 = st.columns([1, 1])
     with nav_col1:
         if st.button("← Prev"):
@@ -428,7 +367,7 @@ with image_tab:
                 pos = excel_rows_list.index(cur) if cur in excel_rows_list else 0
                 new_pos = max(pos - 1, 0)
                 st.session_state.selected_excel_row = int(excel_rows_list[new_pos])
-                st.experimental_rerun()
+                st.rerun()
             except Exception:
                 pass
     with nav_col2:
@@ -439,11 +378,10 @@ with image_tab:
                 pos = excel_rows_list.index(cur) if cur in excel_rows_list else 0
                 new_pos = min(pos + 1, len(excel_rows_list) - 1)
                 st.session_state.selected_excel_row = int(excel_rows_list[new_pos])
-                st.experimental_rerun()
+                st.rerun()
             except Exception:
                 pass
 
-    # Show the raw row values above images for quick context (mirrors the Raw tab)
     st.markdown("### Raw row (quick view)")
     raw_columns = [
         c
@@ -462,7 +400,6 @@ with image_tab:
     if not image_columns:
         st.info("No image-like columns were detected in the workbook.")
     else:
-        # Prepare list of (col_name, bytes) for the selected row
         images_to_show = []
         for col in image_columns:
             bytes_col = f"{col}_bytes"
@@ -470,13 +407,9 @@ with image_tab:
             if img_bytes is not None:
                 images_to_show.append((col, img_bytes))
 
-        # Limit to max 4 images for a 2x2 grid
         images_to_show = images_to_show[:4]
-
-        # Create rows of 2 images each
         rows = [images_to_show[i : i + 2] for i in range(0, len(images_to_show), 2)]
 
-        # Render grid: 2 columns per row
         for row_imgs in rows:
             cols = st.columns(2)
             for idx, (col_name, img_bytes) in enumerate(row_imgs):
@@ -485,42 +418,19 @@ with image_tab:
                     try:
                         if PIL_AVAILABLE:
                             img = Image.open(BytesIO(img_bytes))
-                            if "chromatogram" in col_name.lower():
-                                target_width = 200
-                            else:
-                                target_width = 600
-
+                            target_width = 200 if "chromatogram" in col_name.lower() else 600
                             if img.width > target_width:
                                 ratio = target_width / float(img.width)
                                 target_height = int(img.height * ratio)
                                 img = img.resize((target_width, target_height), Image.LANCZOS)
                             st.image(img, width=target_width)
                         else:
-                            # Streamlit width fallback
-                            if "chromatogram" in col_name.lower():
-                                st.image(img_bytes, width=200)
-                            else:
-                                st.image(img_bytes, width=600)
+                            st.image(img_bytes, width=200 if "chromatogram" in col_name.lower() else 600)
                     except Exception:
-                        # fallback width based on column type
-                        if "chromatogram" in col_name.lower():
-                            st.image(img_bytes, width=200)
-                        else:
-                            st.image(img_bytes, width=600)
+                        st.image(img_bytes, width=200 if "chromatogram" in col_name.lower() else 600)
 
-        # If less than 4 images, optionally show placeholders for visual balance
-        # (we simply leave empty space in the grid)
-
-    # Summary (moved below Images)
     st.markdown("### Summary")
-    # Use the display_present columns (intersection of DISPLAY_COLUMNS and actual columns)
-    try:
-        summary_fields = display_present.copy()
-    except NameError:
-        # fallback: use DISPLAY_COLUMNS that exist in app_df
-        summary_fields = [c for c in DISPLAY_COLUMNS if c in app_df.columns]
-
-    # Always include excel_row at the end
+    summary_fields = display_present.copy()
     if "excel_row" not in summary_fields:
         summary_fields.append("excel_row")
 
@@ -532,19 +442,17 @@ with image_tab:
     st.table(summary_df)
 
     st.download_button(
-        label="Download Round3.xlsx",
-        data=WORKBOOK_LOCAL.read_bytes(),
-        file_name=WORKBOOK_LOCAL.name,
+        label=f"Download {uploaded_file.name}",
+        data=file_bytes,
+        file_name=uploaded_file.name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # Workbook info (moved below Summary)
     st.markdown("### Workbook info")
-    st.write(f"**File:** {WORKBOOK_LOCAL.name}")
+    st.write(f"**File:** {uploaded_file.name}")
     st.write(f"**Sheet names:** {', '.join(workbook_info['sheet_names'])}")
     st.write(f"**Rows:** {workbook_info['max_row']}")
     st.write(f"**Columns:** {workbook_info['max_column']}")
-    # dynamic image mapping
     image_columns_ui = [f[len("has_") : -len("_image")] for f in app_df.columns if f.startswith("has_") and f.endswith("_image")]
     if image_columns_ui:
         mapping = ", ".join(
@@ -556,13 +464,11 @@ with image_tab:
 
 with raw_tab:
     st.markdown("### Raw row values")
-    # Show raw workbook columns (exclude internal _bytes and has_ columns)
     raw_columns = [
         c
         for c in app_df.columns
         if not str(c).lower().endswith("_bytes") and not str(c).lower().startswith("has_")
     ]
-    # ensure excel_row is included
     if "excel_row" not in raw_columns:
         raw_columns.append("excel_row")
 
@@ -572,7 +478,6 @@ with raw_tab:
 
 with gallery_tab:
     st.markdown("### All extracted images for filtered rows")
-    # dynamic gallery based on detected image-like columns
     image_columns_gallery = [f[len("has_") : -len("_image")] for f in app_df.columns if f.startswith("has_") and f.endswith("_image")]
 
     if not image_columns_gallery:
@@ -586,11 +491,9 @@ with gallery_tab:
             if image_bytes is None:
                 continue
             st.markdown(f"**{row['Antibody_name']}**")
-            # Small thumbnail-style images in gallery; let Streamlit pick a reasonable width
             if PIL_AVAILABLE:
                 try:
                     img = Image.open(BytesIO(image_bytes))
-                    # scale down large images for gallery
                     max_w = 600
                     if img.width > max_w:
                         ratio = max_w / float(img.width)

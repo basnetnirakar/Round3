@@ -4,3 +4,4 @@ openpyxl
 lxml
 pillow
 streamlit-aggrid
+requests
