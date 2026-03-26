@@ -1,0 +1,6 @@
+streamlit
+pandas
+openpyxl
+lxml
+pillow
+streamlit-aggrid
