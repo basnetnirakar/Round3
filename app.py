@@ -62,8 +62,8 @@ except Exception:
 #   streamlit run app.py
 # ============================================================
 
-WORKBOOK_LOCAL = Path("Round3_2.xlsx")
-WORKBOOK_URL = os.environ.get("WORKBOOK_URL")  # set this in the hosting environment if using Drive
+#WORKBOOK_LOCAL = Path("Round3_2.xlsx")
+WORKBOOK_URL = os.environ.get("https://docs.google.com/spreadsheets/d/1kO6jzsz5AmDdhJhz05ENbfpfzgTYEGH5/edit?usp=drive_link&ouid=114220445375690810621&rtpof=true&sd=true")  # set this in the hosting environment if using Drive
 
 # Workbook resolution: prefer the newer Round3_2.xlsx but fall back to Round3.xlsx
 SHEET_NAME = "Sheet1"
